@@ -28,7 +28,7 @@ func (logger *Logger) Printf(format string, a ...interface{}) {
 
 func (logger *Logger) Init()  {
   if logger == nil {
-    fmt.Println("variable is nil")
+    fmt.Println("logger variable is nil")
     return
   }
   err := os.Mkdir("log", 0777)
@@ -40,8 +40,8 @@ func (logger *Logger) Init()  {
   }
   err = os.Chdir("..")
   *logger = Logger {
-    filewriter: log.New(logfile, "normal: ", log.Ltime),
-    displayprinter: log.New(os.Stdout, "normal: ", log.Ltime),
+    filewriter: log.New(logfile, "[log] ", log.Ltime),
+    displayprinter: log.New(os.Stdout, "[log] ", log.Ltime),
   }
-  logger.Println("Init message")
+  logger.Println("logger was successfully initialized")
 }

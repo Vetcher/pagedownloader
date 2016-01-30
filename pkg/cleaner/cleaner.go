@@ -45,6 +45,55 @@ func FindTitleAndBody_Ria(node *html.Node) (*html.Node, *html.Node) {
 
 }
 
+func FindTitleMK(node *html.Node) (*html.Node)  {
+    var title *html.Node
+    if node.Type == html.ElementNode {
+        if node.Data == "h1" {
+            return node
+        }
+    }
+    for c:= node.FirstChild; c != nil; c = c.NextSibling {
+        title = FindTitleMK(c)
+        if title != nil {
+            break
+        }
+    }
+    return title
+}
+
+func FindTitleAndBody_MK(node *html.Node) (*html.Node, *html.Node) {
+    var title, fulltext *html.Node
+
+    if node.Type == html.ElementNode {
+        for _, tag := range node.Attr {
+            if tag.Key == "class" {
+                if tag.Val == "content" {
+                    title = FindTitleMK(node)
+                    node.Data = "body"
+                    fulltext = node
+                    break
+                }
+            }
+        }
+    }
+
+  for c:= node.FirstChild; c != nil; c = c.NextSibling {
+      ptitle, pfulltext := FindTitleAndBody_MK(c)
+      if ptitle != nil {
+          title = ptitle
+          title.Data = "title"
+      }
+      if pfulltext != nil {
+          fulltext = pfulltext
+      }
+      if title != nil && fulltext != nil {
+          break
+      }
+  }
+  return title, fulltext
+
+}
+
 //return true if need to delete node, false another way
 func deleteValuelessNodes(innode *html.Node) (bool)  {
     if innode.Type == html.CommentNode {
@@ -135,7 +184,7 @@ func makeHtml(title_n *html.Node, body_n *html.Node) (*html.Node)  {
         body_n.Attr = []html.Attribute{}
         body_n.Parent.RemoveChild(body_n)
     }
-    model := "<html><head></head></html>"
+    model := "<html><head><meta charset=\"utf-8\"></head></html>"
     output, _ := html.Parse(strings.NewReader(model))
 
     htmlnode := output.FirstChild
@@ -149,7 +198,7 @@ func makeHtml(title_n *html.Node, body_n *html.Node) (*html.Node)  {
 }
 
 // clear doc of tags and not target text
-// works cleary on 15.12.2015 with current(today) ria.ru html style
+// works cleary on 30.01.2016 with current(today) ria.ru html style
 // in future may not work
 func ClearRIA(input []byte) ([]byte, bool)  {
     pureString := string(input)
@@ -159,6 +208,26 @@ func ClearRIA(input []byte) ([]byte, bool)  {
     }
     deleteValuelessNodes(doc)
     title, body := FindTitleAndBody_Ria(doc)
+    output := makeHtml(title, body)
+    outbyte:= new(bytes.Buffer)
+    err = html.Render(outbyte, output)
+    if err != nil {
+        return nil, false
+    }
+    return outbyte.Bytes(), true
+}
+
+// clear doc of tags and not target text
+// works cleary on 30.01.2016 with current(today) www.mk.ru html style
+// in future may not work
+func ClearMK(input []byte) ([]byte, bool)  {
+    pureString := string(input)
+    doc, err := html.Parse(strings.NewReader(pureString))
+    if err != nil {
+        return nil, false
+    }
+    deleteValuelessNodes(doc)
+    title, body := FindTitleAndBody_MK(doc)
     output := makeHtml(title, body)
     outbyte:= new(bytes.Buffer)
     err = html.Render(outbyte, output)

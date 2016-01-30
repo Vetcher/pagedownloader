@@ -76,7 +76,7 @@ func InitSettings() (int, int)  {
 }
 
 // split url to path and filename
-func parceurl( _url string) (string, string)  { // directory, filename
+func parceurl(_url string) (string, string)  { // directory, filename
     urlstruct, err := url.Parse(_url)
     if err != nil {
         logger.Println(_url + " | Can't parse url: " + err.Error())
@@ -119,13 +119,13 @@ func NewRequest(_url string)  {
 
     urlstruct, err := url.Parse(_url) // need host name
     if err != nil {
-        logger.Println(_url + " | Can't parse url: " + err.Error())
+        logger.Println(dir + name + " | Can't parse url: " + err.Error())
         return
     }
 
     resp, err := http.Get(_url)
     if err != nil {
-        logger.Println(_url + " | " + err.Error())
+        logger.Println(dir + name + " | " + err.Error())
     }
 
     data, err := ioutil.ReadAll(resp.Body) // convert to []byte
@@ -137,21 +137,31 @@ func NewRequest(_url string)  {
     newfile, err := os.Create(name)
 
     // clear page
-    if urlstruct.Host == "ria.ru" {
+    switch urlstruct.Host {
+    case "ria.ru":
         clean_data, isok := cleaner.ClearRIA(data)
         if isok {
             data = clean_data
-            logger.Println(_url + " | OK, Clear")
+            logger.Println(dir + name + " | OK, Clear")
         } else {
-            logger.Println(_url + " | Error in cleaning, Default")
+            logger.Println(dir + name + " | Error in cleaning, Default")
         }
-    } else {
-        logger.Println(_url + " | OK, Default")
+    case "www.mk.ru":
+        clean_data, isok := cleaner.ClearMK(data)
+        if isok {
+            data = clean_data
+            logger.Println(dir + name + " | OK, Clear")
+        } else {
+            logger.Println(dir + name + " | Error in cleaning, Default")
+        }
+    default:
+        logger.Println(dir + name + " | OK, Default")
     }
+
     _, err = newfile.Write(data)
 
     if err != nil {
-        logger.Println(_url + " | " + err.Error() + "\n")
+        logger.Println(dir + name + " | " + err.Error() + "\n")
         return
     }
 
@@ -276,7 +286,9 @@ func main()  {
     }
 
     logger.Println("Queue: OK ")
-    logger.Printf("Founded %d links, %d already downloaded, in queue %d links\n", count, count - queueOfUrls.Len(), queueOfUrls.Len())
+    logger.Printf("Founded %d links,\n", count)
+    logger.Printf("Already downloaded %d,\n", count - queueOfUrls.Len())
+    logger.Printf("In queue %d links.\n", queueOfUrls.Len())
     i := 0
     queuetimer := time.NewTicker(time.Second * time.Duration(delay))
     logger.Println("Start taker:")
