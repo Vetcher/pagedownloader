@@ -7,7 +7,6 @@ import (
     "net/url"
     "io/ioutil"
     "container/list"
-    "fmt"
     "time"
     "os"
     "path"
@@ -20,46 +19,58 @@ var logger mylogger.Logger
 
 const (
     default_threads int = 0
-    default_delay int = 15
+    default_delay int = 5
+    default_logmode int = 0
+    default_logswitch bool = false
 )
+
+const _setfile_defstr string = "{\n\"multi_thread\": 0,\n\"delay\": 5,\n\"logmode\": 0,\n\"logswitch\": false\n}"
+const _urlfile_defstr string = "{\n\"Lists\": [],\n\"Urls\": []\n}"
 
 type SettingsJSON struct {
     Multi_thread int
     Delay int
+    LogMode int
+    LogSwitch bool
 }
 
 // return vars about init setups
 // 1. multi_thread: 0 if should use one thread, else 1
 // 2. delay: delay in seconds between requests
-func InitSettings() (int, int)  {
+// 3. logmode: mode of logging (0/1/2), check mylogger doc for more information
+// 4. logswitch: true for activate logger
+func InitSettings() (int, int, int, bool)  {
     // open settings
     settingsfile, err := os.Open("settings.cfg")
+    threads, delay, logmode, logswitch := default_threads, default_delay, default_logmode, default_logswitch
+
     if err != nil {
       settingsfile, err = os.Create("settings.cfg")
       if err != nil {
-          logger.Println("No 'setting.cfg' file. Can not create it!. Using default settings.")
+          logger.Alwaysln("No 'setting.cfg' file. Can not create it!. Using default settings.")
       } else {
-          logger.Println("No 'setting.cfg' file. It was created. Using default settings.")
+          logger.Alwaysln("No 'setting.cfg' file. It was created. Using default settings.")
+          settingsfile.Write([]byte(_setfile_defstr)) // default settings file
           settingsfile.Close()
+          logger.Alwaysf("multi_thread: %d, delay: %d, logmode: %d, logswitch: %t", threads, delay, logmode, logswitch)
+          return threads, delay, logmode, logswitch
       }
-      logger.Printf("multi_thread: %d, delay: %d", default_threads, default_delay)
-      return default_threads, default_delay
     }
     jtext, err := ioutil.ReadAll(settingsfile)
     if err != nil {
-        logger.Println("Read error. Using default settings.")
-        logger.Printf("multi_thread: %d, delay: %d", default_threads, default_delay)
-        return default_threads, default_delay
+        logger.Alwaysln("Read error. Using default settings.")
+        logger.Alwaysf("multi_thread: %d, delay: %d, logmode: %d, logswitch: %t", threads, delay, logmode, logswitch)
+        return threads, delay, logmode, logswitch
     }
     settingsfile.Close()
     var s SettingsJSON
     err = json.Unmarshal(jtext, &s)
     if err != nil {
-        logger.Println("Wrong settings file format. Look JSON spec. Using default settings.")
-        logger.Printf("multi_thread: %d, delay: %d", default_threads, default_delay)
-        return default_threads, default_delay
+        logger.Alwaysln("Wrong settings file format. Look JSON spec. Using default settings.")
+        logger.Alwaysf("multi_thread: %d, delay: %d, logmode: %d, logswitch: %t", threads, delay, logmode, logswitch)
+        return threads, delay, logmode, logswitch
     }
-    var threads, delay int
+    // set variables
     if s.Multi_thread != 0 {
         threads = 1
     } else {
@@ -70,16 +81,18 @@ func InitSettings() (int, int)  {
     } else {
         delay = s.Delay
     }
+    logmode = s.LogMode
+    logswitch = s.LogSwitch
 
-    logger.Printf("multi_thread: %d, delay: %d", threads, delay)
-    return threads, delay
+    logger.Alwaysf("multi_thread: %d, delay: %d, logmode: %d, logswitch: %t", threads, delay, logmode, logswitch)
+    return threads, delay, logmode, logswitch
 }
 
 // split url to path and filename
 func parceurl(_url string) (string, string)  { // directory, filename
     urlstruct, err := url.Parse(_url)
     if err != nil {
-        logger.Println(_url + " | Can't parse url: " + err.Error())
+        logger.Alwaysln("\tCan't parse url: " + err.Error())
         return "./", ";errname"
     }
     return "./data/" + urlstruct.Host + path.Dir(urlstruct.Path), path.Base(urlstruct.Path)
@@ -109,64 +122,80 @@ func ShouldItBeDownloaded(url string) (bool)  {
     return false
 }
 
-// create new Get request, save response to file
-func NewRequest(_url string)  {
+// create new Get request, save response to file, returns status of request (done/not)
+func NewRequest(_url string) (bool)  {
 
     dir, name := parceurl(_url) // make filename 'name' and directory for file 'dir'
     if name == ";errname" {
-        return
+        return false
     }
 
     urlstruct, err := url.Parse(_url) // need host name
     if err != nil {
-        logger.Println(dir + name + " | Can't parse url: " + err.Error())
-        return
+        logger.Alwaysln("\tCan't parse url: " + err.Error())
+        return false
     }
 
     resp, err := http.Get(_url)
     if err != nil {
-        logger.Println(dir + name + " | " + err.Error())
+        logger.Alwaysln("\tGet error: " + err.Error())
+        return false
     }
 
     data, err := ioutil.ReadAll(resp.Body) // convert to []byte
-
+    if err != nil {
+        logger.Alwaysln("\tCan't read from request: " + err.Error())
+        return false
+    }
     // filesystem shamaning
     curdir, err := os.Getwd()
     err = os.MkdirAll(dir, 0777)
     err = os.Chdir(dir)
+    defer os.Chdir(curdir) // go back to main dir after request
     newfile, err := os.Create(name)
-
+    if err != nil {
+        logger.Alwaysln("\tCan't create file: " + err.Error())
+        return false
+    }
+    defer newfile.Close()
     // clear page
     switch urlstruct.Host {
     case "ria.ru":
         clean_data, isok := cleaner.ClearRIA(data)
         if isok {
             data = clean_data
-            logger.Println(dir + name + " | OK, Clear")
+            logger.Alwaysf("\tClear")
         } else {
-            logger.Println(dir + name + " | Error in cleaning, Default")
+            logger.Alwaysf("\tError in cleaning, Default")
         }
     case "www.mk.ru":
         clean_data, isok := cleaner.ClearMK(data)
         if isok {
             data = clean_data
-            logger.Println(dir + name + " | OK, Clear")
+            logger.Alwaysf("\tClear")
         } else {
-            logger.Println(dir + name + " | Error in cleaning, Default")
+            logger.Alwaysf("\tError in cleaning, Default")
         }
     default:
-        logger.Println(dir + name + " | OK, Default")
+        logger.Alwaysf("\tDefault")
     }
+
 
     _, err = newfile.Write(data)
 
     if err != nil {
-        logger.Println(dir + name + " | " + err.Error() + "\n")
-        return
+        fullpath, err1 := os.Getwd()
+        if err1 != nil {
+            logger.Alwaysln("\tCan't return directory to file: " + err1.Error() + "\n")
+        }
+        logger.Alwaysln("\tWrite data error in" + fullpath + "/" + newfile.Name() + " : " + err.Error() + "\n")
+        return false
     }
 
-    newfile.Close()
-    err = os.Chdir(curdir)
+
+
+    logger.Alwaysln("\tOK")
+    return true
 }
 
 type UrlNode struct {
@@ -178,6 +207,7 @@ type UrlsJSON struct {
     Pages []UrlNode
 }
 
+// create queue with urls
 // parce 'urls.cfg' for default urls
 // list of sitemaps, list of urls
 func MakeFirstList() (*list.List, *list.List) {
@@ -185,23 +215,24 @@ func MakeFirstList() (*list.List, *list.List) {
     if err != nil {
       urlsfile, err = os.Create("urls.cfg")
       if err != nil {
-          logger.Println("No 'urls.cfg' file. Can not create it!.")
+          logger.Alwaysln("No 'urls.cfg' file. Can not create it!.")
       } else {
-          logger.Println("No 'urls.cfg' file. It was created.")
+          logger.Alwaysln("No 'urls.cfg' file. It was created.")
+          urlsfile.Write([]byte(_urlfile_defstr))
           urlsfile.Close()
       }
       return nil, nil
     }
     jtext, err := ioutil.ReadAll(urlsfile)
     if err != nil {
-        logger.Println("Read error.")
+        logger.Alwaysln("Read error.")
         return nil, nil
     }
     urlsfile.Close()
     var s UrlsJSON
     err = json.Unmarshal(jtext, &s)
     if err != nil {
-        logger.Println("Wrong settings file format. Look JSON spec.")
+        logger.Alwaysln("Wrong settings file format. Look JSON spec.")
         return nil, nil
     }
     sitemap := list.New()
@@ -210,7 +241,7 @@ func MakeFirstList() (*list.List, *list.List) {
     }
     if sitemap.Len() == 0 {
         sitemap = nil
-        logger.Println("no sitemaps")
+        logger.Alwaysln("No sitemaps in \"urls.cfg\"")
     }
     listofurls := list.New()
     for _, elem := range s.Pages {
@@ -218,7 +249,7 @@ func MakeFirstList() (*list.List, *list.List) {
     }
     if listofurls.Len() == 0 {
         listofurls = nil
-        logger.Println("no direct urls")
+        logger.Alwaysln("No direct urls in \"urls.cfg\"")
     }
     return sitemap, listofurls
 }
@@ -230,44 +261,51 @@ type XMLSTRUCT struct {
 
 func GetAndParseXML(_xml_url string, _queue *list.List) (int) {
     if _queue == nil {
-        logger.Println("Error: queue is nil")
+        logger.Alwaysln("Error: queue is nil")
         return 0
     }
     // Get .xml file from server
     xmlfile, err := http.Get(_xml_url)
     if err != nil {
-        logger.Println("Get \"" + _xml_url + "\": " + err.Error())
+        logger.Alwaysln("Get \"" + _xml_url + "\": " + err.Error())
         return 0
     }
-    logger.Println("Get \"" + _xml_url + "\": OK")
+    logger.Moreln("Get \"" + _xml_url + "\": OK")
     xmltext, err := ioutil.ReadAll(xmlfile.Body)
 
     // tokenize .xml file
     var xmldoc XMLSTRUCT
     err = xml.Unmarshal([]byte(xmltext), &xmldoc)
     if err != nil {
-        logger.Println("Unmarshal \"" + _xml_url + "\" failed: " + err.Error())
+        logger.Alwaysln("Unmarshal \"" + _xml_url + "\" failed: " + err.Error())
         return 0
     }
-    logger.Println("Unmarshal \"" + _xml_url + "\": OK ")
+    logger.Moreln("Unmarshal \"" + _xml_url + "\": OK ")
 
     count := len(xmldoc.Urls)
     for index := 0; index < count; index++ {
         if !ShouldItBeDownloaded(xmldoc.Urls[index]) {
-            logger.Println(xmldoc.Urls[index] + " already downloaded")
+            logger.Debugln(xmldoc.Urls[index] + " already downloaded")
             continue
         }
         _queue.PushBack(xmldoc.Urls[index])
     }
+    logger.Alwaysln(_xml_url + " OK")
     return count
 }
 
 func main()  {
-    logger.Init()
-    _, delay := InitSettings() // open settings.cfg for settings
+    logger.Init(0)
+    defer logger.Alwaysln("LAST LOG MESSAGE")
+    _, delay, logmode, logswitch := InitSettings() // open settings.cfg for settings
+    if logswitch {
+        logger.ChangeMode(logmode)
+    } else {
+        logger.Deactivate()
+    }
     list_with_sitemaps, list_with_urls := MakeFirstList() // open urls.cfg for targets
     if list_with_urls == nil && list_with_sitemaps == nil {
-        logger.Println("Nothing to download")
+        logger.Alwaysln("Nothing to download")
         return
     }
 
@@ -285,24 +323,33 @@ func main()  {
         }
     }
 
-    logger.Println("Queue: OK ")
-    logger.Printf("Founded %d links,\n", count)
-    logger.Printf("Already downloaded %d,\n", count - queueOfUrls.Len())
-    logger.Printf("In queue %d links.\n", queueOfUrls.Len())
+    dur := time.Duration(queueOfUrls.Len() * delay) * time.Second
+    logger.Moreln("Queue: OK ")
+    logger.Alwaysln("---------------------------------------------")
+    logger.Alwaysf("Founded %d links,\n", count)
+    logger.Alwaysf("Already downloaded %d,\n", count - queueOfUrls.Len())
+    logger.Alwaysf("In queue %d links.\n", queueOfUrls.Len())
+    logger.Alwaysf("Time remaining about %v\n", dur)
+    logger.Alwaysln("---------------------------------------------")
     i := 0
+    count = 0
     queuetimer := time.NewTicker(time.Second * time.Duration(delay))
-    logger.Println("Start taker:")
+    logger.Alwaysln("Start taker:")
 	   for {
            select {
             case <- queuetimer.C:
                 if queueOfUrls.Front() != nil {
-                    fmt.Print(i)
-                    fmt.Print(": ")
                     temp := queueOfUrls.Front()
-		            NewRequest(temp.Value.(string))
+                    requesturl := temp.Value.(string)
                     queueOfUrls.Remove(temp)
+                    logger.Alwaysf("%d: %s", i, requesturl)
+		            boo := NewRequest(temp.Value.(string))
+                    if boo {
+                        count++
+                    }
                     i++
                 } else {
+                    logger.Alwaysf("Head of queue, %d documents downloaded.", count)
                     return
                 }
             }
