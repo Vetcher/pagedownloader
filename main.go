@@ -10,7 +10,11 @@ import (
     "os"
     "path"
     logger "github.com/jbrodriguez/mlog"
-	"container/list"
+	"errors"
+	"github.com/gosuri/uiprogress"
+	"sync"
+	"github.com/vetcher/pagedownloader/handlers"
+	"strconv"
 )
 
 const (
@@ -20,14 +24,24 @@ const (
     default_logswitch bool = false
 )
 
-const _setfile_defstr string = "{\n\"multi_thread\": 0,\n\"delay\": 5,\n\"logmode\": 0,\n\"logswitch\": false\n}"
-const _urlfile_defstr string = "{\n\"Lists\": [],\n\"Urls\": []\n}"
+const SETTINGS_FILE_DEFAULT_STRING string = "" +
+		"{\n" +
+		"\"multi_thread\": 0,\n" +
+		"\"delay\": 5,\n" +
+		"\"logmode\": 0,\n" +
+		"\"logswitch\": false\n" +
+		"}"
+const URL_FILE_DEFAULT_STRING string = "" +
+		"{\n" +
+		"\"sitemaps\": [],\n" +
+		"\"pages\": []\n" +
+		"}"
 
 type SettingsJSON struct {
-    Multi_thread int
-    Delay int
-    LogMode int
-    LogSwitch bool
+	Multi_thread int `json:"multi_thread"`
+	Delay        int `json:"delay"`
+	LogMode      int `json:"logmode"`
+	LogSwitch    bool `json:"logswitch"`
 }
 
 // return vars about init setups
@@ -50,7 +64,7 @@ func InitSettings() (threads int, delay int, logmode int, logswitch bool)  {
 	      return
       } else {
           logger.Warning("No 'setting.cfg' file. It was created. Using default settings.")
-          settingsfile.Write([]byte(_setfile_defstr)) // default settings file
+          settingsfile.Write([]byte(SETTINGS_FILE_DEFAULT_STRING)) // default settings file
           settingsfile.Close()
 
           return
@@ -66,6 +80,7 @@ func InitSettings() (threads int, delay int, logmode int, logswitch bool)  {
     err = json.Unmarshal(jtext, &s)
     if err != nil {
         logger.Warning("Wrong settings file format. Look JSON spec. Using default settings.")
+	    logger.Warning(err.Error())
         return
     }
     // set variables
@@ -97,7 +112,7 @@ func parceurl(_url string) (string, string, error)  { // directory, filename
 
 // TODO: here should be requests to DB
 // Check database for file
-func ShouldItBeDownloaded(url string) (bool)  {
+func ShouldLinkBeDownloaded(url string) (bool)  {
     _path, _name, err := parceurl(url) // make filename 'name' and directory for file 'dir'
     if _name == ";errname" || err != nil {
         return false
@@ -121,8 +136,8 @@ func ShouldItBeDownloaded(url string) (bool)  {
 }
 
 type UrlsJSON struct {
-    Lists []string
-    Pages []string
+    Sitemaps []string `json:"sitemaps"`
+    Pages    []string `json:"pages"`
 }
 
 // Open file `urls.cfg` and return []byte representation of it
@@ -136,10 +151,16 @@ func GetDataFromUrlsFile() ([]byte, error) {
 			logger.Warning("No %s file. Can not create it!.", urls_config)
 		} else {
 			logger.Warning("No %s file. It was created.", urls_config)
-			urlsfile.Write([]byte(_urlfile_defstr))
+			var t UrlsJSON
+			f, err := json.Marshal(t)
+			if err != nil {
+				logger.Error(err)
+				panic(err)
+			}
+			urlsfile.Write(f)
 			urlsfile.Close()
 		}
-		return nil, error("Can't open" + urls_config)
+		return nil, errors.New("Can't open " + urls_config)
 	}
 	defer urlsfile.Close()
 	jtext, err := ioutil.ReadAll(urlsfile)
@@ -154,32 +175,25 @@ func GetDataFromUrlsFile() ([]byte, error) {
 // parce 'urls.cfg' for default urls
 // list of sitemaps, list of urls
 func MakeFirstList() ([]string, []string) {
-
+	jtext, err := GetDataFromUrlsFile()
     var s UrlsJSON
     err = json.Unmarshal(jtext, &s)
     if err != nil {
-        panic(err.Error())
-        logger.Alwaysln("Wrong settings file format. Look JSON spec.")
-        logger.Alwaysln(err.Error())
+        logger.Warning("Wrong settings file format. Look JSON spec.")
+        logger.Warning(err.Error())
         return nil, nil
     }
-    sitemap := list.New()
-    for _, elem := range s.Lists {
-        sitemap.PushBack(elem.Url)
-    }
-    if sitemap.Len() == 0 {
+	sitemap := s.Sitemaps
+    if len(sitemap) == 0 {
         sitemap = nil
-        logger.Alwaysln("No sitemaps in \"urls.cfg\"")
+        logger.Info("No sitemaps in \"urls.cfg\"")
     }
-    listofurls := list.New()
-    for _, elem := range s.Pages {
-        listofurls.PushBack(elem.Url)
+	pages := s.Pages
+    if len(pages) == 0 {
+	    pages = nil
+        logger.Info("No direct urls in \"urls.cfg\"")
     }
-    if listofurls.Len() == 0 {
-        listofurls = nil
-        logger.Alwaysln("No direct urls in \"urls.cfg\"")
-    }
-    return sitemap, listofurls
+    return sitemap, pages
 }
 
 type XMLSTRUCT struct {
@@ -187,99 +201,135 @@ type XMLSTRUCT struct {
     Urls []string `xml:"url>loc"`
 }
 
-func GetAndParseXML(_xml_url string, _queue *list.List) (int) {
-    if _queue == nil {
-        logger.Alwaysln("Error: queue is nil")
-        return 0
-    }
-    // Get .xml file from server
+func GetAndParseXML(_xml_url string) (queue []string, err error) {
+
+    // Get .xml file (sitemap) from server
     xmlfile, err := http.Get(_xml_url)
     if err != nil {
-        logger.Alwaysln("Get \"" + _xml_url + "\": " + err.Error())
-        return 0
+        logger.Warning("Get \"" + _xml_url + "\": " + err.Error())
+        return
     }
-    logger.Moreln("Get \"" + _xml_url + "\": OK")
+    logger.Trace("Get \"" + _xml_url + "\": OK")
     xmltext, err := ioutil.ReadAll(xmlfile.Body)
 
     // tokenize .xml file
     var xmldoc XMLSTRUCT
     err = xml.Unmarshal([]byte(xmltext), &xmldoc)
     if err != nil {
-        logger.Alwaysln("Unmarshal \"" + _xml_url + "\" failed: " + err.Error())
-        return 0
+        logger.Warning("Unmarshal \"" + _xml_url + "\" failed: " + err.Error())
+        return
     }
-    logger.Moreln("Unmarshal \"" + _xml_url + "\": OK ")
+    logger.Trace("Unmarshal \"" + _xml_url + "\": OK ")
 
-    count := len(xmldoc.Urls)
-    for index := 0; index < count; index++ {
-        if !ShouldItBeDownloaded(xmldoc.Urls[index]) {
-            logger.Debugln(xmldoc.Urls[index] + " already downloaded")
-            continue
+    for _, link := range xmldoc.Urls {
+        if ShouldLinkBeDownloaded(link) {
+            queue = append(queue, link)
+        } else {
+	        logger.Trace(link + " already downloaded")
         }
-        _queue.PushBack(xmldoc.Urls[index])
     }
-    logger.Alwaysln(_xml_url + " OK")
-    return count
+    logger.Trace(_xml_url + " OK")
+    return
+}
+
+// Concatenate all lists with links to map with queues
+func CreateQueues() (queuesOfUrls map[string][]string, count int) {
+	queuesOfUrls = make(map[string][]string)
+	// Init queue
+	list_with_sitemaps, list_with_urls := MakeFirstList() // open urls.cfg for targets
+	if list_with_urls == nil && list_with_sitemaps == nil {
+		logger.Info("Nothing to download")
+		return
+	}
+
+	if list_with_sitemaps != nil {
+		for _, elem := range list_with_sitemaps{
+			urlstruct, err := url.Parse(elem)
+			if err != nil {
+				logger.Warning("\tCan't parse url: " + err.Error())
+				continue
+			}
+			r, err := GetAndParseXML(elem)
+			if err != nil {
+				logger.Warning("Can't download %s", elem)
+				continue
+			}
+			if len(r) > 0 {
+				count += len(r)
+				queuesOfUrls[urlstruct.Host] = append(queuesOfUrls[urlstruct.Host], r...) // `...` is a magic for concat 2 slices
+			}
+		}
+	}
+	if list_with_urls != nil {
+		for _, elem := range list_with_urls {
+			urlstruct, err := url.Parse(elem)
+			if err != nil {
+				logger.Warning("\tCan't parse url: " + err.Error())
+
+			} else {
+				queuesOfUrls[urlstruct.Host] = append(queuesOfUrls[urlstruct.Host], elem)
+			}
+		}
+		count += len(list_with_urls)
+	}
+	return
+}
+
+var AllHandlers map[string]handlers.HostHandlerInterface
+
+func init() {
+	AllHandlers = make(map[string]handlers.HostHandlerInterface)
+	AllHandlers["ria.ru"] = &handlers.RiaHandler{}
 }
 
 func main()  {
 	// Init setting and logger
+	log_file_name := "log/" + time.Now().Format("02-01-06.15_04_05") + ".log"
+	logger.Start(logger.LevelTrace, log_file_name)
     defer logger.Info("LAST LOG MESSAGE")
 	defer logger.Stop()
-    _, delay, logmode, _ := InitSettings() // open settings.cfg for settings
-	log_file_name := time.Now().Format("02-01-06.15_04_05") + ".log"
-	logger.Start(logger.LogLevel(logmode), log_file_name)
+	logger.Info("FIRST LOG MESSAGE")
+    _, delay, _, _ := InitSettings() // open settings.cfg for settings
 
-	// Init queue
-    list_with_sitemaps, list_with_urls := MakeFirstList() // open urls.cfg for targets
-    if list_with_urls == nil && list_with_sitemaps == nil {
-        logger.Info("Nothing to download")
-        return
-    }
+	queueOfUrls, urls_count := CreateQueues()
+	host_count := len(queueOfUrls)
 
-    queueOfUrls := list.New()
-    count := 0
-    if list_with_sitemaps != nil {
-        for elem := list_with_sitemaps.Front(); elem != nil; elem = elem.Next() {
-            count += GetAndParseXML(elem.Value.(string), queueOfUrls)
-        }
-    }
-    if list_with_urls != nil {
-        for elem := list_with_urls.Front(); elem != nil; elem = elem.Next() {
-            queueOfUrls.PushBack(elem.Value.(string))
-            count++
-        }
-    }
-
-    dur := time.Duration(queueOfUrls.Len() * delay) * time.Second
+	if host_count == 0 {
+		logger.Warning("Empty")
+		return
+	}
+    dur := time.Duration(urls_count * delay * 2 / host_count) * time.Second
     logger.Trace("Queue: OK ")
-    logger.Alwaysln("---------------------------------------------")
-    logger.Alwaysf("Founded %d links,\n", count)
-    logger.Alwaysf("Already downloaded %d,\n", count - queueOfUrls.Len())
-    logger.Alwaysf("In queue %d links.\n", queueOfUrls.Len())
-    logger.Alwaysf("Time remaining about %v\n", dur)
-    logger.Alwaysln("---------------------------------------------")
-    i := 0
-    count = 0
-    queuetimer := time.NewTicker(time.Second * time.Duration(delay))
-    logger.Alwaysln("Start taker:")
-	   for {
-           select {
-            case <- queuetimer.C:
-                if queueOfUrls.Front() != nil {
-                    temp := queueOfUrls.Front()
-                    requesturl := temp.Value.(string)
-                    queueOfUrls.Remove(temp)
-                    logger.Alwaysf("%d: %s", i, requesturl)
-		            boo := NewRequest(temp.Value.(string))
-                    if boo {
-                        count++
-                    }
-                    i++
-                } else {
-                    logger.Alwaysf("Head of queue, %d documents downloaded.", count)
-                    return
-                }
-            }
-        }
+    logger.Info("---------------------------------------------")
+    logger.Info("In queue %d links.\n", urls_count)
+    logger.Info("Time remaining ~ %v\n", dur)
+    logger.Info("---------------------------------------------")
+
+	uiprogress.Fill = '#'
+	uiprogress.Empty = ' '
+	uiprogress.Start()
+
+	var wg sync.WaitGroup
+    logger.Info("Start download:")
+	for host, queue := range queueOfUrls {
+		hostHandler, is_exist := AllHandlers[host]
+		if is_exist {
+
+			bar := uiprogress.AddBar(len(queue)).PrependFunc(func(b *uiprogress.Bar) string {
+				return host
+			}).PrependFunc(func(b *uiprogress.Bar) string {
+				return strconv.Itoa(b.Current()) + "/" + strconv.Itoa(b.Total)
+			}).PrependElapsed().AppendCompleted()
+
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				hostHandler.Init(host, queue, time.Duration(delay) * time.Second)
+				hostHandler.Start(bar)
+			}()
+		} else {
+			logger.Warning("Handler for %s not found", host)
+		}
+	}
+	wg.Wait()
 }

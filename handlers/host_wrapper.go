@@ -1,4 +1,4 @@
-package main
+package handlers
 
 import (
 	"net/http"
@@ -6,6 +6,7 @@ import (
 	logger "github.com/jbrodriguez/mlog"
 	"time"
 	"sync"
+	"github.com/gosuri/uiprogress"
 )
 
 // If you want to add some urls to Queue after call `Start()`,
@@ -17,8 +18,20 @@ type HostHandler struct {
 	QueueMx sync.Mutex
 }
 
+type HostHandlerInterface interface {
+	Start(bar *uiprogress.Bar)
+	HandleResponse([]byte) error
+	Init(string, []string, time.Duration)
+}
+
+func (hh *HostHandler) Init(host string, queue []string, delay time.Duration) {
+	hh.HostName = host
+	hh.Queue = queue
+	hh.Delay = delay
+}
+
 // Checks HostHandler fields for correct working and starts cycle
-func (hh *HostHandler) Start() {
+func (hh *HostHandler) Start(bar *uiprogress.Bar) {
 	if hh.HostName == "" {
 		logger.Warning(" `HostName` is empty, please specify it")
 		return
@@ -26,26 +39,31 @@ func (hh *HostHandler) Start() {
 		logger.Warning(hh.HostName + " `Queue` is empty, please add some urls")
 		return
 	}
-	hh.startPipeline()
+	hh.startPipeline(bar)
 }
 
 // This function iterates over Queue and calls handlers
-func (hh *HostHandler) startPipeline() {
+func (hh *HostHandler) startPipeline(bar *uiprogress.Bar) {
+	queuetimer := time.NewTicker(hh.Delay)
 	for len(hh.Queue) != 0 {
-		// Get new url from queue
-		new_url := hh.popUrlFromQueue()
+		select {
+		case <- queuetimer.C:
+			bar.Incr()
+			// Get new url from queue
+			new_url := hh.popUrlFromQueue()
 
-		// Connect over HTTP to `new_url`
-		answer, err := hh.newRequest(new_url)
-		if err != nil {
-			logger.Warning(err.Error())
-			continue
-		}
+			// Connect over HTTP to `new_url`
+			answer, err := hh.newRequest(new_url)
+			if err != nil {
+				logger.Warning(err.Error())
+				continue
+			}
 
-		// Give response's body to handler
-		if err := hh.HandleResponse(answer); err != nil {
-			logger.Warning(err.Error())
-			continue
+			// Give response's body to handler
+			if err := hh.HandleResponse(answer); err != nil {
+				logger.Warning(err.Error())
+				continue
+			}
 		}
 	}
 }
